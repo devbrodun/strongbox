@@ -1,0 +1,3 @@
+Replace this file with docs/architecture.png
+Required content: diagram showing 3-node cluster, nginx, postgres, seal/unseal flow,
+encryption layers (DEK -> KEK -> Shamir shares), auth/policy flow, audit chain.
