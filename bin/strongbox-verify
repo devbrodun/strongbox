@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# bin/strongbox-verify — Audit log tamper verification
+# OWNER: Person 2 (Auth, Policies & Audit)
+#
+# Usage:
+#   strongbox-verify <audit_log_file>
+#
+# Behaviour:
+#   Reads every entry in the log from genesis.
+#   Re-derives each entry's HMAC from the chain: HMAC(prev_hash || entry_fields).
+#   If any entry's stored hash != re-derived hash:
+#     exits non-zero and prints the bad entry index and entry content.
+#   If all entries are valid: exits 0 and prints "OK: N entries verified".
+#
+# Requires STRONGBOX_AUDIT_SECRET to be set in the environment (or loaded from
+# a sealed key file that this tool knows how to open).
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
+
+source "$LIB_DIR/audit.sh"
+
+# TODO: implement verify logic
+#   1. Read log file line by line (each line is a JSON entry)
+#   2. For each entry at index i:
+#      a. Extract stored entry_hash and prev_hash from JSON
+#      b. Re-derive: hmac = HMAC-SHA256(STRONGBOX_AUDIT_SECRET, prev_hash || ts || token || op || path || result)
+#      c. Compare; on mismatch: print "TAMPERED: entry $i: <entry>" and exit 1
+#   3. Verify prev_hash chain links (entry[i].prev_hash == entry[i-1].entry_hash)
+#   4. On success: print "OK: $i entries verified"; exit 0
+
+LOG_FILE="${1:-}"
+if [[ -z "$LOG_FILE" || ! -f "$LOG_FILE" ]]; then
+    echo "Usage: strongbox-verify <audit_log_file>" >&2
+    exit 1
+fi
+
+echo "NOT IMPLEMENTED" >&2
+exit 1

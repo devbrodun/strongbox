@@ -1,0 +1,35 @@
+# config.yaml — StrongBox cluster configuration reference
+# Environment variables take precedence over these values.
+# Load with: source <(python3 -c "import yaml,os,sys; ...")
+# Or pass directly as Docker env vars (see compose.yaml).
+
+node_id: ""           # REQUIRED: unique per node (node1 / node2 / node3)
+bind_addr: "0.0.0.0"
+port: 8200
+
+shamir:
+  k: 3                # shares required to unseal
+  n: 5                # total shares generated
+
+data_dir: "/var/lib/strongbox"
+audit_log: "/var/lib/strongbox/audit.log"
+
+lease:
+  default_ttl: 3600   # seconds
+  max_ttl: 86400      # seconds
+  reaper_interval: 30 # seconds between reaper runs
+
+cluster:
+  peers: []           # ["node2:8201", "node3:8202"]
+  node_addr: ""       # this node's advertised address "host:port"
+  election_timeout_min_ms: 150
+  election_timeout_max_ms: 300
+  heartbeat_interval_ms: 50
+
+postgres:
+  host: "localhost"
+  port: 5432
+  db: "strongbox"
+  user: "sbadmin"
+  password: ""        # use STRONGBOX_PG_PASS env var in production
+  grant: "SELECT ON ALL TABLES IN SCHEMA public"

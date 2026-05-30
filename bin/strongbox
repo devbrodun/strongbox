@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+# bin/strongbox — StrongBox secrets manager entrypoint
+#
+# Responsibilities owned by Person 1:
+#   - Boot in SEALED state
+#   - POST /v1/sys/init     (one-time init: generate KEK, split via Shamir)
+#   - POST /v1/sys/unseal   (collect shares, reconstruct KEK, transition to UNSEALED)
+#   - POST /v1/sys/seal     (zero KEK, return to SEALED)
+#   - GET  /v1/sys/health
+#   - PUT  /v1/secrets/{path}           (encrypt + store)
+#   - GET  /v1/secrets/{path}[?version] (decrypt + return)
+#   - DELETE /v1/secrets/{path}
+#
+# Other routes (auth, leases, dynamic, audit, cluster) are handled by their
+# respective lib/*.sh modules sourced here. HTTP dispatch lives in lib/http.sh.
+#
+# Config (from config.yaml or env overrides):
+#   STRONGBOX_NODE_ID      (required)
+#   STRONGBOX_BIND_ADDR    (default: 0.0.0.0)
+#   STRONGBOX_PORT         (default: 8200)
+#   STRONGBOX_SHAMIR_K     (default: 3)
+#   STRONGBOX_SHAMIR_N     (default: 5)
+#   STRONGBOX_DATA_DIR     (default: /var/lib/strongbox)
+#   STRONGBOX_AUDIT_LOG    (default: /var/lib/strongbox/audit.log)
+#   STRONGBOX_LEASE_TTL    (default: 3600)
+#   STRONGBOX_LEASE_MAX    (default: 86400)
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
+
+# Source all library modules
+# shellcheck source=../lib/crypto.sh
+source "$LIB_DIR/crypto.sh"
+# shellcheck source=../lib/storage.sh
+source "$LIB_DIR/storage.sh"
+# shellcheck source=../lib/auth.sh
+source "$LIB_DIR/auth.sh"
+# shellcheck source=../lib/audit.sh
+source "$LIB_DIR/audit.sh"
+# shellcheck source=../lib/lease.sh
+source "$LIB_DIR/lease.sh"
+# shellcheck source=../lib/dynamic.sh
+source "$LIB_DIR/dynamic.sh"
+# shellcheck source=../lib/consensus.sh
+source "$LIB_DIR/consensus.sh"
+# shellcheck source=../lib/http.sh
+source "$LIB_DIR/http.sh"
+
+# ---------------------------------------------------------------------------
+# Global state
+# ---------------------------------------------------------------------------
+STRONGBOX_SEALED="true"
+STRONGBOX_INIT="false"
+
+# Shamir unseal progress
+declare -a _UNSEAL_SHARES=()
+_UNSEAL_PROGRESS=0
+
+# Config defaults
+STRONGBOX_NODE_ID="${STRONGBOX_NODE_ID:-node1}"
+STRONGBOX_BIND_ADDR="${STRONGBOX_BIND_ADDR:-0.0.0.0}"
+STRONGBOX_PORT="${STRONGBOX_PORT:-8200}"
+STRONGBOX_SHAMIR_K="${STRONGBOX_SHAMIR_K:-3}"
+STRONGBOX_SHAMIR_N="${STRONGBOX_SHAMIR_N:-5}"
+STRONGBOX_DATA_DIR="${STRONGBOX_DATA_DIR:-/var/lib/strongbox}"
+STRONGBOX_AUDIT_LOG="${STRONGBOX_AUDIT_LOG:-${STRONGBOX_DATA_DIR}/audit.log}"
+STRONGBOX_LEASE_TTL="${STRONGBOX_LEASE_TTL:-3600}"
+STRONGBOX_LEASE_MAX="${STRONGBOX_LEASE_MAX:-86400}"
+
+# Init state file (survives restarts to know if init was done)
+STRONGBOX_INIT_FILE="${STRONGBOX_DATA_DIR}/.initialized"
+
+# ---------------------------------------------------------------------------
+# Seal/unseal helpers
+# ---------------------------------------------------------------------------
+
+_is_sealed() { [[ "$STRONGBOX_SEALED" == "true" ]]; }
+_is_initialized() { [[ -f "$STRONGBOX_INIT_FILE" ]]; }
+
+_assert_unsealed() {
+    if _is_sealed; then
+        http_respond 503 '{"error":"vault is sealed"}'
+        return 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Route: POST /v1/sys/init
+# One-time initialization: generate KEK, split into Shamir shares,
+# create root token, store only what's necessary (init marker, wrapped nothing).
+# The KEK is NOT stored — only shares are given to the operator.
+# ---------------------------------------------------------------------------
+handle_sys_init() {
+    if _is_initialized; then
+        http_respond 400 '{"error":"already initialized"}'
+        return
+    fi
+
+    local k="$STRONGBOX_SHAMIR_K"
+    local n="$STRONGBOX_SHAMIR_N"
+
+    # Generate KEK
+    local kek_hex
+    kek_hex=$(crypto_generate_kek)
+
+    # Split KEK into Shamir shares using Python lib
+    local raw_shares
+    raw_shares=$(python3 "$LIB_DIR/shamir.py" split "$kek_hex" "$k" "$n")
+
+    # Build JSON share array
+    local shares_json="["
+    local first=true
+    while IFS= read -r line; do
+        [[ "$first" == "true" ]] || shares_json+=","
+        shares_json+="\"${line}\""
+        first=false
+    done <<< "$raw_shares"
+    shares_json+="]"
+
+    # Load KEK into memory so we can create root token
+    crypto_load_kek "$kek_hex"
+    STRONGBOX_SEALED="false"
+    STRONGBOX_INIT="true"
+
+    # Zero kek_hex local variable (best-effort)
+    kek_hex="$(printf '%0.s0' $(seq 1 ${#kek_hex}))"
+    unset kek_hex
+
+    # Create root token (delegates to auth module)
+    local root_token
+    root_token=$(auth_create_root_token)
+
+    # Mark initialized
+    mkdir -p "$STRONGBOX_DATA_DIR"
+    touch "$STRONGBOX_INIT_FILE"
+
+    audit_append "sys" "root" "init" "sys/init" "success"
+
+    http_respond 200 "{\"shares\":${shares_json},\"root_token\":\"${root_token}\"}"
+}
+
+# ---------------------------------------------------------------------------
+# Route: POST /v1/sys/unseal   body: {"share":"<index:hex>"}
+# Collect shares one at a time. When K shares collected, reconstruct KEK.
+# After reconstruction: zero all share buffers and intermediate data.
+# ---------------------------------------------------------------------------
+handle_sys_unseal() {
+    local body="${1:-}"
+    local share
+    share=$(echo "$body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(d.get('share',''))
+" 2>/dev/null) || { http_respond 400 '{"error":"invalid JSON"}'; return; }
+
+    if [[ -z "$share" ]]; then
+        http_respond 400 '{"error":"share required"}'
+        return
+    fi
+
+    if ! _is_initialized; then
+        http_respond 400 '{"error":"not initialized"}'
+        return
+    fi
+
+    if ! _is_sealed; then
+        http_respond 200 '{"sealed":false,"progress":"already unsealed"}'
+        return
+    fi
+
+    # Validate share format: "N:hexstring"
+    if ! [[ "$share" =~ ^[0-9]+:[0-9a-f]+$ ]]; then
+        http_respond 400 '{"error":"invalid share format, expected index:hex"}'
+        return
+    fi
+
+    # Deduplicate by index
+    local share_index="${share%%:*}"
+    for existing in "${_UNSEAL_SHARES[@]:-}"; do
+        if [[ "${existing%%:*}" == "$share_index" ]]; then
+            http_respond 400 '{"error":"duplicate share index"}'
+            return
+        fi
+    done
+
+    _UNSEAL_SHARES+=("$share")
+    _UNSEAL_PROGRESS="${#_UNSEAL_SHARES[@]}"
+
+    if [[ "$_UNSEAL_PROGRESS" -lt "$STRONGBOX_SHAMIR_K" ]]; then
+        http_respond 200 "{\"sealed\":true,\"progress\":\"${_UNSEAL_PROGRESS}/${STRONGBOX_SHAMIR_K}\"}"
+        return
+    fi
+
+    # We have K shares — reconstruct
+    local combine_args=("$STRONGBOX_SHAMIR_K")
+    for s in "${_UNSEAL_SHARES[@]}"; do
+        combine_args+=("$s")
+    done
+
+    local kek_hex
+    kek_hex=$(python3 "$LIB_DIR/shamir.py" combine "${combine_args[@]}" 2>/dev/null) || {
+        http_respond 500 '{"error":"key reconstruction failed"}'
+        # Zero shares on failure too
+        _unseal_zero_shares
+        return
+    }
+
+    # Load KEK into memory
+    crypto_load_kek "$kek_hex"
+    STRONGBOX_SEALED="false"
+
+    # CRITICAL: zero all share data and the reconstructed key from local scope
+    kek_hex="$(printf '%0.s0' $(seq 1 ${#kek_hex}))"
+    unset kek_hex
+    _unseal_zero_shares
+
+    audit_append "sys" "operator" "unseal" "sys/unseal" "success"
+
+    http_respond 200 "{\"sealed\":false,\"progress\":\"${STRONGBOX_SHAMIR_K}/${STRONGBOX_SHAMIR_K}\"}"
+}
+
+# Zero all share buffers from the unseal array and reset progress.
+_unseal_zero_shares() {
+    local i
+    for (( i=0; i < ${#_UNSEAL_SHARES[@]:-0}; i++ )); do
+        local s="${_UNSEAL_SHARES[$i]}"
+        _UNSEAL_SHARES[$i]="$(printf '%0.s0' $(seq 1 ${#s}))"
+    done
+    _UNSEAL_SHARES=()
+    _UNSEAL_PROGRESS=0
+}
+
+# ---------------------------------------------------------------------------
+# Route: POST /v1/sys/seal
+# Requires valid auth token. Zeroes KEK and returns to sealed state.
+# ---------------------------------------------------------------------------
+handle_sys_seal() {
+    local token="${1:-}"
+    if ! auth_validate_token "$token" "sys" "write"; then
+        http_respond 403 '{"error":"forbidden"}'
+        return
+    fi
+
+    crypto_unload_kek
+    STRONGBOX_SEALED="true"
+    _unseal_zero_shares
+
+    audit_append "sys" "$token" "seal" "sys/seal" "success"
+    http_respond 204 ""
+}
+
+# ---------------------------------------------------------------------------
+# Route: GET /v1/sys/health
+# Always responds, even when sealed.
+# ---------------------------------------------------------------------------
+handle_sys_health() {
+    local leader term node_id
+    leader=$(consensus_is_leader && echo "true" || echo "false")
+    term=$(consensus_current_term)
+    node_id="$STRONGBOX_NODE_ID"
+
+    http_respond 200 "{\"sealed\":${STRONGBOX_SEALED},\"leader\":${leader},\"term\":${term},\"node_id\":\"${node_id}\"}"
+}
+
+# ---------------------------------------------------------------------------
+# Route: PUT /v1/secrets/{path}   body: {"data":{...}}
+# Encrypt the data value and store it with versioning.
+# ---------------------------------------------------------------------------
+handle_secret_write() {
+    local path="${1:?}" token="${2:-}" body="${3:-}"
+
+    _assert_unsealed || return
+
+    if ! auth_validate_token "$token" "$path" "write"; then
+        http_respond 403 '{"error":"forbidden"}'
+        return
+    fi
+
+    # Forward to leader if we're a follower
+    if ! consensus_is_leader; then
+        local leader_addr
+        leader_addr=$(consensus_leader_addr)
+        http_respond 307 "{\"error\":\"not leader\",\"leader\":\"${leader_addr}\"}"
+        return
+    fi
+
+    # Extract data as JSON string to encrypt
+    local data_json
+    data_json=$(echo "$body" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+print(json.dumps(d.get('data',{})))
+" 2>/dev/null) || { http_respond 400 '{"error":"invalid JSON"}'; return; }
+
+    # Encrypt
+    local blob
+    blob=$(crypto_encrypt_secret "$data_json") || {
+        http_respond 500 '{"error":"encryption failed"}'
+        return
+    }
+
+    # Store with versioning
+    local version
+    version=$(storage_put "secret/${path}" "$blob")
+
+    audit_append "secret" "$token" "write" "secret/${path}" "v${version}"
+    http_respond 201 "{\"version\":${version}}"
+}
+
+# ---------------------------------------------------------------------------
+# Route: GET /v1/secrets/{path}[?version=N]
+# Decrypt and return secret data, issue a lease.
+# ---------------------------------------------------------------------------
+handle_secret_read() {
+    local path="${1:?}" token="${2:-}" version="${3:-}"
+
+    _assert_unsealed || return
+
+    if ! auth_validate_token "$token" "$path" "read"; then
+        http_respond 403 '{"error":"forbidden"}'
+        return
+    fi
+
+    local blob
+    blob=$(storage_get "secret/${path}" "$version") || {
+        http_respond 404 '{"error":"not found"}'
+        return
+    }
+
+    local plaintext
+    plaintext=$(crypto_decrypt_secret "$blob") || {
+        http_respond 500 '{"error":"decryption failed"}'
+        return
+    }
+
+    local actual_version
+    if [[ -n "$version" ]]; then
+        actual_version="$version"
+    else
+        actual_version=$(storage_latest_version "secret/${path}")
+    fi
+
+    # Issue a lease
+    local lease_json
+    lease_json=$(lease_create "secret/${path}" "$STRONGBOX_LEASE_TTL" "$STRONGBOX_LEASE_MAX")
+
+    audit_append "secret" "$token" "read" "secret/${path}" "v${actual_version}"
+
+    # plaintext is already a JSON object (the data field)
+    http_respond 200 "{\"data\":${plaintext},\"version\":${actual_version},\"lease\":${lease_json}}"
+}
+
+# ---------------------------------------------------------------------------
+# Route: DELETE /v1/secrets/{path}
+# ---------------------------------------------------------------------------
+handle_secret_delete() {
+    local path="${1:?}" token="${2:-}"
+
+    _assert_unsealed || return
+
+    if ! auth_validate_token "$token" "$path" "delete"; then
+        http_respond 403 '{"error":"forbidden"}'
+        return
+    fi
+
+    if ! consensus_is_leader; then
+        local leader_addr
+        leader_addr=$(consensus_leader_addr)
+        http_respond 307 "{\"error\":\"not leader\",\"leader\":\"${leader_addr}\"}"
+        return
+    fi
+
+    storage_delete "secret/${path}" || {
+        http_respond 404 '{"error":"not found"}'
+        return
+    }
+
+    audit_append "secret" "$token" "delete" "secret/${path}" "success"
+    http_respond 204 ""
+}
+
+# ---------------------------------------------------------------------------
+# Signal handlers
+# ---------------------------------------------------------------------------
+_shutdown() {
+    echo "[strongbox] shutting down, zeroing KEK..." >&2
+    crypto_unload_kek
+    _unseal_zero_shares
+    exit 0
+}
+trap _shutdown SIGTERM SIGINT
+
+# ---------------------------------------------------------------------------
+# Main: start HTTP server
+# ---------------------------------------------------------------------------
+main() {
+    mkdir -p "$STRONGBOX_DATA_DIR"
+
+    if _is_initialized; then
+        STRONGBOX_INIT="true"
+        echo "[strongbox] node=$STRONGBOX_NODE_ID port=$STRONGBOX_PORT state=SEALED (initialized, awaiting unseal)" >&2
+    else
+        echo "[strongbox] node=$STRONGBOX_NODE_ID port=$STRONGBOX_PORT state=SEALED (not initialized)" >&2
+    fi
+
+    # Start background processes
+    lease_reaper_start
+    consensus_start
+
+    # Start HTTP server (blocks)
+    http_serve "$STRONGBOX_BIND_ADDR" "$STRONGBOX_PORT"
+}
+
+main "$@"

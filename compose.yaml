@@ -1,0 +1,106 @@
+# compose.yaml — 3-node StrongBox cluster + PostgreSQL
+# OWNER: Person 4 (Cluster, HTTP & Infrastructure)
+#
+# TODO: fill in image builds, volume mounts, network config, env vars
+
+version: "3.9"
+
+networks:
+  strongbox-net:
+    driver: bridge
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  pg-data:
+
+services:
+
+  # ---------- StrongBox nodes ----------
+  node1:
+    build: .
+    # TODO: command: ["/app/bin/strongbox"]
+    environment:
+      STRONGBOX_NODE_ID: node1
+      STRONGBOX_PORT: "8200"
+      STRONGBOX_SHAMIR_K: "3"
+      STRONGBOX_SHAMIR_N: "5"
+      STRONGBOX_PEERS: "node2:8201,node3:8202"
+      STRONGBOX_NODE_ADDR: "node1:8200"
+      STRONGBOX_DATA_DIR: /var/lib/strongbox
+      STRONGBOX_PG_HOST: postgres
+      STRONGBOX_PG_PORT: "5432"
+      STRONGBOX_PG_DB: strongbox
+      STRONGBOX_PG_USER: sbadmin
+      STRONGBOX_PG_PASS: "${POSTGRES_PASSWORD}"
+    volumes:
+      - node1-data:/var/lib/strongbox
+    networks: [strongbox-net]
+    depends_on: [postgres]
+    # TODO: healthcheck, restart policy
+
+  node2:
+    build: .
+    environment:
+      STRONGBOX_NODE_ID: node2
+      STRONGBOX_PORT: "8201"
+      STRONGBOX_SHAMIR_K: "3"
+      STRONGBOX_SHAMIR_N: "5"
+      STRONGBOX_PEERS: "node1:8200,node3:8202"
+      STRONGBOX_NODE_ADDR: "node2:8201"
+      STRONGBOX_DATA_DIR: /var/lib/strongbox
+      STRONGBOX_PG_HOST: postgres
+      STRONGBOX_PG_PORT: "5432"
+      STRONGBOX_PG_DB: strongbox
+      STRONGBOX_PG_USER: sbadmin
+      STRONGBOX_PG_PASS: "${POSTGRES_PASSWORD}"
+    volumes:
+      - node2-data:/var/lib/strongbox
+    networks: [strongbox-net]
+    depends_on: [postgres]
+
+  node3:
+    build: .
+    environment:
+      STRONGBOX_NODE_ID: node3
+      STRONGBOX_PORT: "8202"
+      STRONGBOX_SHAMIR_K: "3"
+      STRONGBOX_SHAMIR_N: "5"
+      STRONGBOX_PEERS: "node1:8200,node2:8201"
+      STRONGBOX_NODE_ADDR: "node3:8202"
+      STRONGBOX_DATA_DIR: /var/lib/strongbox
+      STRONGBOX_PG_HOST: postgres
+      STRONGBOX_PG_PORT: "5432"
+      STRONGBOX_PG_DB: strongbox
+      STRONGBOX_PG_USER: sbadmin
+      STRONGBOX_PG_PASS: "${POSTGRES_PASSWORD}"
+    volumes:
+      - node3-data:/var/lib/strongbox
+    networks: [strongbox-net]
+    depends_on: [postgres]
+
+  # ---------- Nginx TLS proxy ----------
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # TODO: mount Let's Encrypt certs
+      # - /etc/letsencrypt:/etc/letsencrypt:ro
+    networks: [strongbox-net]
+    depends_on: [node1, node2, node3]
+
+  # ---------- PostgreSQL (dynamic secrets target) ----------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: strongbox
+      POSTGRES_USER: sbadmin
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    networks: [strongbox-net]
+    # TODO: healthcheck
