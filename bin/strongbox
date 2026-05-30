@@ -26,7 +26,6 @@
 #   STRONGBOX_LEASE_MAX    (default: 86400)
 
 set -euo pipefail
-set -m
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
 
@@ -123,7 +122,6 @@ handle_sys_init() {
     crypto_load_kek "$kek_hex"
     STRONGBOX_SEALED="false"
     STRONGBOX_INIT="true"
-    _consensus_save_state_to_file
 
     # Zero kek_hex local variable (best-effort)
     kek_hex="$(printf '%0.s0' $(seq 1 ${#kek_hex}))"
@@ -161,9 +159,7 @@ print(d.get('share',''))
         return
     fi
 
-    # In cluster mode, we allow unsealing even if not locally initialized,
-    # as initialization is done on one node and shares are used to unseal the rest.
-    if ! _is_initialized && [[ -z "${STRONGBOX_PEERS:-}" ]]; then
+    if ! _is_initialized; then
         http_respond 400 '{"error":"not initialized"}'
         return
     fi
@@ -213,11 +209,6 @@ print(d.get('share',''))
     # Load KEK into memory
     crypto_load_kek "$kek_hex"
     STRONGBOX_SEALED="false"
-    _consensus_save_state_to_file
-
-    # Mark initialized locally
-    mkdir -p "$STRONGBOX_DATA_DIR"
-    touch "$STRONGBOX_INIT_FILE"
 
     # CRITICAL: zero all share data and the reconstructed key from local scope
     kek_hex="$(printf '%0.s0' $(seq 1 ${#kek_hex}))"
@@ -253,7 +244,6 @@ handle_sys_seal() {
 
     crypto_unload_kek
     STRONGBOX_SEALED="true"
-    _consensus_save_state_to_file
     _unseal_zero_shares
 
     audit_append "sys" "$token" "seal" "sys/seal" "success"
@@ -389,16 +379,6 @@ handle_secret_delete() {
     audit_append "secret" "$token" "delete" "secret/${path}" "success"
     http_respond 204 ""
 }
-# ---------------------------------------------------------------------------
-# Thin wrappers for auth, policy, lease and dynamic PG routing
-# ---------------------------------------------------------------------------
-handle_auth_login()            { auth_login "$@"; }
-handle_auth_revoke()           { auth_revoke_token "$@"; }
-handle_auth_self()             { auth_token_info "$@"; }
-handle_policy_write()          { auth_create_policy "$@"; }
-handle_policy_read()           { auth_get_policy "$@"; }
-handle_lease_renew()           { lease_renew "$@"; }
-handle_lease_revoke()          { lease_revoke "$@"; }
 
 # ---------------------------------------------------------------------------
 # Signal handlers
@@ -407,11 +387,6 @@ _shutdown() {
     echo "[strongbox] shutting down, zeroing KEK..." >&2
     crypto_unload_kek
     _unseal_zero_shares
-    local pids
-    pids=$(jobs -p 2>/dev/null) || pids=""
-    if [[ -n "$pids" ]]; then
-        kill $pids 2>/dev/null || true
-    fi
     exit 0
 }
 trap _shutdown SIGTERM SIGINT
