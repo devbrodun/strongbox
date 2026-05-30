@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # lib/http.sh — HTTP request routing and response helpers
-# OWNER: Person 4 (Cluster, HTTP & Infrastructure)
 
 set -euo pipefail
 
