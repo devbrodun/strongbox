@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# test/integration/test_person1.sh
 # Tests for: Shamir, crypto envelope encryption, storage versioning, seal/unseal flow.
-# Run standalone: bash test/integration/test_person1.sh
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,8 +8,8 @@ LIB_DIR="$(cd "$SCRIPT_DIR/../../lib" && pwd)"
 PASS=0
 FAIL=0
 
-_ok() { echo "  PASS: $1"; (( PASS++ )); }
-_fail() { echo "  FAIL: $1"; (( FAIL++ )); }
+_ok() { echo "  PASS: $1"; (( PASS++ )) || true; }
+_fail() { echo "  FAIL: $1"; (( FAIL++ )) || true; }
 
 _assert_eq() {
     local label="$1" got="$2" want="$3"
@@ -99,6 +97,10 @@ _assert_eq "32-byte KEK round-trip" "$RECK" "$KEK"
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Crypto envelope encryption tests ==="
+
+export STRONGBOX_DATA_DIR="/tmp/strongbox-test-person1"
+rm -rf "$STRONGBOX_DATA_DIR"
+mkdir -p "$STRONGBOX_DATA_DIR"
 
 source "$LIB_DIR/crypto.sh"
 source "$LIB_DIR/storage.sh"

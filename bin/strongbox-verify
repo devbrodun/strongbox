@@ -21,20 +21,52 @@ LIB_DIR="$(cd "$SCRIPT_DIR/../lib" && pwd)"
 
 source "$LIB_DIR/audit.sh"
 
-# TODO: implement verify logic
-#   1. Read log file line by line (each line is a JSON entry)
-#   2. For each entry at index i:
-#      a. Extract stored entry_hash and prev_hash from JSON
-#      b. Re-derive: hmac = HMAC-SHA256(STRONGBOX_AUDIT_SECRET, prev_hash || ts || token || op || path || result)
-#      c. Compare; on mismatch: print "TAMPERED: entry $i: <entry>" and exit 1
-#   3. Verify prev_hash chain links (entry[i].prev_hash == entry[i-1].entry_hash)
-#   4. On success: print "OK: $i entries verified"; exit 0
-
 LOG_FILE="${1:-}"
 if [[ -z "$LOG_FILE" || ! -f "$LOG_FILE" ]]; then
     echo "Usage: strongbox-verify <audit_log_file>" >&2
     exit 1
 fi
 
-echo "NOT IMPLEMENTED" >&2
-exit 1
+if [[ -z "${STRONGBOX_AUDIT_SECRET:-}" ]]; then
+    echo "ERROR: STRONGBOX_AUDIT_SECRET environment variable is not set" >&2
+    exit 1
+fi
+
+expected_prev_hash="0000000000000000000000000000000000000000000000000000000000000000"
+i=0
+
+# Read file line by line
+while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+
+    # Parse JSON fields using jq
+    ts=$(echo "$line" | jq -r '.ts' 2>/dev/null)
+    token=$(echo "$line" | jq -r '.token' 2>/dev/null)
+    op=$(echo "$line" | jq -r '.op' 2>/dev/null)
+    path=$(echo "$line" | jq -r '.path' 2>/dev/null)
+    result=$(echo "$line" | jq -r '.result' 2>/dev/null)
+    prev_hash=$(echo "$line" | jq -r '.prev_hash' 2>/dev/null)
+    entry_hash=$(echo "$line" | jq -r '.entry_hash' 2>/dev/null)
+
+    # Verify prev_hash chain link
+    if [[ "$prev_hash" != "$expected_prev_hash" ]]; then
+        echo "TAMPERED: entry $i: $line"
+        exit 1
+    fi
+
+    # Re-derive HMAC signature
+    data_to_sign="${prev_hash}|${ts}|${token}|${op}|${path}|${result}"
+    computed_hash=$(echo -n "$data_to_sign" | openssl dgst -sha256 -hmac "$STRONGBOX_AUDIT_SECRET" | awk '{print $NF}')
+
+    if [[ "$computed_hash" != "$entry_hash" ]]; then
+        echo "TAMPERED: entry $i: $line"
+        exit 1
+    fi
+
+    expected_prev_hash="$entry_hash"
+    i=$((i + 1))
+done < "$LOG_FILE"
+
+echo "OK: $i entries verified"
+exit 0
+

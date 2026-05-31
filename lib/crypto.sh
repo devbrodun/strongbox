@@ -45,31 +45,15 @@ _crypto_random_hex() {
 # Also sets _CRYPTO_TAG (16-byte tag hex) as a side effect via temp file.
 _crypto_aes_gcm_encrypt() {
     local key_hex="${1:?}" nonce_hex="${2:?}" plaintext_hex="${3:?}"
-    local tag_file
-    tag_file=$(mktemp)
+    local helper_path
+    helper_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/crypto_helper.py"
 
-    local ct_hex
-    ct_hex=$(printf '%s' "$plaintext_hex" \
-        | xxd -r -p \
-        | openssl enc -aes-256-gcm \
-            -K "$key_hex" \
-            -iv "$nonce_hex" \
-            -nosalt \
-            -nopad \
-            -e \
-            -2>/dev/null \
-        | xxd -p | tr -d '\n')
+    local out
+    out=$(python3 "$helper_path" encrypt "$key_hex" "$nonce_hex" "$plaintext_hex")
 
-    # openssl writes the GCM tag to a separate invocation; use EVP_AEAD style
-    # via openssl cms or the newer enc with -aes-256-gcm and capture tag.
-    # Portable approach: use openssl enc -aes-256-gcm which appends the 16-byte
-    # tag at the end of the output when run with -e.
-    # Re-split: last 32 hex chars = 16 bytes = tag.
-    _CRYPTO_TAG="${ct_hex: -32}"
-    ct_hex="${ct_hex:0:${#ct_hex}-32}"
-
-    rm -f "$tag_file"
-    printf '%s' "$ct_hex"
+    local tag_hex="${out: -32}"
+    local ct_hex="${out:0:${#out}-32}"
+    printf '%s|%s' "$tag_hex" "$ct_hex"
 }
 
 # AES-256-GCM decrypt.
@@ -77,20 +61,10 @@ _crypto_aes_gcm_encrypt() {
 # Stdout: plaintext_hex
 _crypto_aes_gcm_decrypt() {
     local key_hex="${1:?}" nonce_hex="${2:?}" tag_hex="${3:?}" ct_hex="${4:?}"
+    local helper_path
+    helper_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/crypto_helper.py"
 
-    # Append tag back for openssl dec (it expects tag at end)
-    local full_ct_hex="${ct_hex}${tag_hex}"
-
-    printf '%s' "$full_ct_hex" \
-        | xxd -r -p \
-        | openssl enc -aes-256-gcm \
-            -K "$key_hex" \
-            -iv "$nonce_hex" \
-            -nosalt \
-            -nopad \
-            -d \
-            2>/dev/null \
-        | xxd -p | tr -d '\n'
+    python3 "$helper_path" decrypt "$key_hex" "$nonce_hex" "$tag_hex" "$ct_hex"
 }
 
 # Encode raw hex as base64.
@@ -117,6 +91,8 @@ crypto_generate_kek() {
 crypto_load_kek() {
     local kek_hex="${1:?}"
     export STRONGBOX_KEK="$kek_hex"
+    export STRONGBOX_AUDIT_SECRET
+    STRONGBOX_AUDIT_SECRET=$(echo -n "audit_secret_salt" | openssl dgst -sha256 -hmac "$kek_hex" | awk '{print $NF}')
 }
 
 # crypto_unload_kek
@@ -127,13 +103,17 @@ crypto_unload_kek() {
         STRONGBOX_KEK="$(printf '%0.s0' $(seq 1 ${#STRONGBOX_KEK}))"
         unset STRONGBOX_KEK
     fi
+    if [[ -n "${STRONGBOX_AUDIT_SECRET:-}" ]]; then
+        STRONGBOX_AUDIT_SECRET="$(printf '%0.s0' $(seq 1 ${#STRONGBOX_AUDIT_SECRET}))"
+        unset STRONGBOX_AUDIT_SECRET
+    fi
 }
 
 # crypto_encrypt_secret  <plaintext>
 # Encrypt a secret value with a fresh random DEK, wrap the DEK with the KEK.
 # Stdout: wrapped_dek_b64|encrypted_value_b64
 crypto_encrypt_secret() {
-    _crypto_require_kek
+    _crypto_require_kek || return 1
     local plaintext="${1:?plaintext required}"
     local kek_hex="$STRONGBOX_KEK"
 
@@ -142,20 +122,20 @@ crypto_encrypt_secret() {
     dek_hex=$(_crypto_random_hex 32)
 
     # 2. Encrypt the plaintext with the DEK
-    local val_nonce_hex val_ct_hex val_tag
+    local val_nonce_hex val_ct_hex val_tag val_enc_res
     val_nonce_hex=$(_crypto_random_hex 12)
     local plaintext_hex
     plaintext_hex=$(printf '%s' "$plaintext" | xxd -p | tr -d '\n')
-    _CRYPTO_TAG=""
-    val_ct_hex=$(_crypto_aes_gcm_encrypt "$dek_hex" "$val_nonce_hex" "$plaintext_hex")
-    val_tag="$_CRYPTO_TAG"
+    val_enc_res=$(_crypto_aes_gcm_encrypt "$dek_hex" "$val_nonce_hex" "$plaintext_hex")
+    val_tag="${val_enc_res%%|*}"
+    val_ct_hex="${val_enc_res##*|}"
 
     # 3. Wrap the DEK with the KEK
-    local dek_nonce_hex dek_ct_hex dek_tag
+    local dek_nonce_hex dek_ct_hex dek_tag dek_enc_res
     dek_nonce_hex=$(_crypto_random_hex 12)
-    _CRYPTO_TAG=""
-    dek_ct_hex=$(_crypto_aes_gcm_encrypt "$kek_hex" "$dek_nonce_hex" "$dek_hex")
-    dek_tag="$_CRYPTO_TAG"
+    dek_enc_res=$(_crypto_aes_gcm_encrypt "$kek_hex" "$dek_nonce_hex" "$dek_hex")
+    dek_tag="${dek_enc_res%%|*}"
+    dek_ct_hex="${dek_enc_res##*|}"
 
     # 4. Pack: nonce(24 hex) || tag(32 hex) || ct_hex → base64
     local wrapped_dek_b64 encrypted_val_b64
@@ -173,7 +153,7 @@ crypto_encrypt_secret() {
 # Decrypt a secret previously encrypted with crypto_encrypt_secret.
 # Stdout: plaintext
 crypto_decrypt_secret() {
-    _crypto_require_kek
+    _crypto_require_kek || return 1
     local blob="${1:?blob required}"
     local kek_hex="$STRONGBOX_KEK"
 
@@ -231,10 +211,11 @@ crypto_wrap_kek_with_passphrase() {
 
     local nonce_hex
     nonce_hex=$(_crypto_random_hex 12)
-    _CRYPTO_TAG=""
-    local ct_hex
-    ct_hex=$(_crypto_aes_gcm_encrypt "$derived_hex" "$nonce_hex" "$kek_hex")
-    local tag_hex="$_CRYPTO_TAG"
+    
+    local enc_res tag_hex ct_hex
+    enc_res=$(_crypto_aes_gcm_encrypt "$derived_hex" "$nonce_hex" "$kek_hex")
+    tag_hex="${enc_res%%|*}"
+    ct_hex="${enc_res##*|}"
 
     local params_b64
     params_b64=$(printf 'argon2id$t=3,m=65536,p=1$%s' "$salt_hex" | base64 -w 0)

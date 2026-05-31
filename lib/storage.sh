@@ -25,9 +25,8 @@
 
 set -euo pipefail
 
-declare -gA _STORE_VERSIONS=()
-declare -gA _STORE_DATA=()
-declare -gA _STORE_DELETED=()
+STRONGBOX_DATA_DIR="${STRONGBOX_DATA_DIR:-/var/lib/strongbox}"
+_STORAGE_DIR="${STRONGBOX_DATA_DIR}/store"
 
 # ---------------------------------------------------------------------------
 # storage_put <path> <encrypted_blob>
@@ -38,14 +37,19 @@ storage_put() {
     local path="${1:?path required}"
     local blob="${2:?blob required}"
 
-    _storage_validate_path "$path"
+    _storage_validate_path "$path" || return 1
 
-    local prev_ver="${_STORE_VERSIONS[$path]:-0}"
+    local pdir="${_STORAGE_DIR}/${path}"
+    local prev_ver=0
+    if [[ -f "${pdir}/latest" ]]; then
+        prev_ver=$(cat "${pdir}/latest")
+    fi
     local new_ver=$(( prev_ver + 1 ))
 
-    _STORE_VERSIONS["$path"]="$new_ver"
-    _STORE_DATA["${path}:${new_ver}"]="$blob"
-    unset '_STORE_DELETED[$path]' 2>/dev/null || true
+    mkdir -p "$pdir"
+    printf '%s' "$blob" > "${pdir}/version_${new_ver}"
+    printf '%d' "$new_ver" > "${pdir}/latest"
+    rm -f "${pdir}/deleted"
 
     printf '%d' "$new_ver"
 }
@@ -59,16 +63,20 @@ storage_get() {
     local path="${1:?path required}"
     local version="${2:-}"
 
-    _storage_validate_path "$path"
+    _storage_validate_path "$path" || return 1
 
-    if [[ -n "${_STORE_DELETED[$path]:-}" ]]; then
+    local pdir="${_STORAGE_DIR}/${path}"
+
+    if [[ -f "${pdir}/deleted" ]]; then
         return 1
     fi
 
-    local latest="${_STORE_VERSIONS[$path]:-0}"
-    if [[ "$latest" -eq 0 ]]; then
+    if [[ ! -f "${pdir}/latest" ]]; then
         return 1
     fi
+
+    local latest
+    latest=$(cat "${pdir}/latest")
 
     local target_ver
     if [[ -z "$version" ]]; then
@@ -81,12 +89,11 @@ storage_get() {
         return 1
     fi
 
-    local key="${path}:${target_ver}"
-    if [[ -z "${_STORE_DATA[$key]:-}" ]]; then
+    if [[ ! -f "${pdir}/version_${target_ver}" ]]; then
         return 1
     fi
 
-    printf '%s' "${_STORE_DATA[$key]}"
+    cat "${pdir}/version_${target_ver}"
 }
 
 # ---------------------------------------------------------------------------
@@ -95,13 +102,15 @@ storage_get() {
 # ---------------------------------------------------------------------------
 storage_delete() {
     local path="${1:?path required}"
-    _storage_validate_path "$path"
+    _storage_validate_path "$path" || return 1
 
-    if [[ -z "${_STORE_VERSIONS[$path]:-}" ]]; then
+    local pdir="${_STORAGE_DIR}/${path}"
+
+    if [[ ! -f "${pdir}/latest" ]]; then
         return 1
     fi
 
-    _STORE_DELETED["$path"]="1"
+    touch "${pdir}/deleted"
 }
 
 # ---------------------------------------------------------------------------
@@ -113,15 +122,21 @@ storage_list() {
     local prefix="${1:-}"
     local results=()
 
-    for path in "${!_STORE_VERSIONS[@]}"; do
-        [[ -n "${_STORE_DELETED[$path]:-}" ]] && continue
-        if [[ -z "$prefix" || "$path" == "$prefix"* ]]; then
-            results+=("$path")
-        fi
-    done
+    if [[ -d "$_STORAGE_DIR" ]]; then
+        # Use find in a subshell to safely traverse and get relative paths
+        while read -r rel; do
+            if [[ -f "${_STORAGE_DIR}/${rel}/latest" && ! -f "${_STORAGE_DIR}/${rel}/deleted" ]]; then
+                results+=("$rel")
+            fi
+        done < <(cd "$_STORAGE_DIR" && find . -type d ! -path . | sed 's|^\./||' | sort)
+    fi
 
     if [[ "${#results[@]}" -gt 0 ]]; then
-        printf '%s\n' "${results[@]}" | sort
+        for r in "${results[@]}"; do
+            if [[ -z "$prefix" || "$r" == "$prefix"* ]]; then
+                printf '%s\n' "$r"
+            fi
+        done
     fi
 }
 
@@ -132,18 +147,19 @@ storage_list() {
 # ---------------------------------------------------------------------------
 storage_latest_version() {
     local path="${1:?path required}"
-    _storage_validate_path "$path"
+    _storage_validate_path "$path" || return 1
 
-    if [[ -n "${_STORE_DELETED[$path]:-}" ]]; then
+    local pdir="${_STORAGE_DIR}/${path}"
+
+    if [[ -f "${pdir}/deleted" ]]; then
         return 1
     fi
 
-    local v="${_STORE_VERSIONS[$path]:-0}"
-    if [[ "$v" -eq 0 ]]; then
+    if [[ ! -f "${pdir}/latest" ]]; then
         return 1
     fi
 
-    printf '%d' "$v"
+    cat "${pdir}/latest"
 }
 
 # ---------------------------------------------------------------------------
@@ -152,7 +168,9 @@ storage_latest_version() {
 # ---------------------------------------------------------------------------
 storage_exists() {
     local path="${1:?}"
-    [[ -z "${_STORE_DELETED[$path]:-}" && -n "${_STORE_VERSIONS[$path]:-}" ]]
+    _storage_validate_path "$path" || return 1
+    local pdir="${_STORAGE_DIR}/${path}"
+    [[ ! -f "${pdir}/deleted" && -f "${pdir}/latest" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -171,4 +189,5 @@ _storage_validate_path() {
         echo "ERROR: empty path" >&2
         return 1
     fi
+    return 0
 }
