@@ -118,6 +118,18 @@ handle_internal_replicate() {
   esac
 }
 
+handle_internal_vote() {
+  local resp
+  resp="$(consensus_handle_vote_request "$REQ_BODY")"
+  json_response 200 "$resp"
+}
+
+handle_internal_heartbeat() {
+  local resp
+  resp="$(consensus_handle_heartbeat "$REQ_BODY")"
+  json_response 200 "$resp"
+}
+
 sys_init() {
   storage_exists sys init && { error_response 409 "already initialized"; return; }
   local k n master kek wrapped shares root root_token root_token_id token_record meta
@@ -179,6 +191,18 @@ sys_seal() {
 }
 
 sys_health() {
+  local is_sealed leader term body
+  is_sealed=false
+  sealed && is_sealed=true
+  consensus_refresh_leader >/dev/null 2>&1 || true
+  leader="$(consensus_leader)"
+  term="$(consensus_term)"
+  body="$(jq -nc --argjson sealed "$is_sealed" --arg leader "$leader" --argjson term "$term" --arg node_id "$NODE_ID" \
+    '{sealed:$sealed,leader:$leader,term:$term,node_id:$node_id}')"
+  json_response 200 "$body"
+}
+
+internal_health() {
   local is_sealed leader term body
   is_sealed=false
   sealed && is_sealed=true
@@ -400,10 +424,13 @@ http_route() {
     "GET /v1/leases") base_route leases ;;
     "GET /v1/leases/") base_route leases ;;
     "GET /v1/sys/health") sys_health ;;
+    "GET /_internal/health") internal_health ;;
     "POST /v1/sys/init") sys_init ;;
     "POST /v1/sys/unseal") sys_unseal ;;
     "POST /v1/sys/seal") sys_seal ;;
     "POST /_internal/replicate") handle_internal_replicate ;;
+    "POST /_internal/vote") handle_internal_vote ;;
+    "POST /_internal/heartbeat") handle_internal_heartbeat ;;
     "POST /v1/auth/login") auth_login_route ;;
     "POST /v1/auth/tokens") auth_token_create_route ;;
     "POST /v1/auth/revoke") auth_revoke_route ;;

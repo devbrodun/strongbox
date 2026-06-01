@@ -1,30 +1,32 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
-
 SB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export SB_ROOT
-
 source "$SB_ROOT/lib/http.sh"
-
 if [[ "${1:-}" == "--handle" ]]; then
   http_handle_once
   exit 0
 fi
-
 PORT="${STRONGBOX_PORT:-8200}"
-
 audit_init
 consensus_init
 mkdir -p "$STATE_DIR" "$RUNTIME_DIR"
-
+crypto_daemon_loop &
+CRYPTO_PID=$!
+for _ in {1..50}; do
+  [[ -p "$RUNTIME_DIR/crypto.cmd" ]] && break
+  sleep 0.1
+done
 lease_reaper_loop &
 REAPER_PID=$!
-
+consensus_run_loop &
+CONSENSUS_PID=$!
 cleanup() {
+  kill "$CRYPTO_PID" 2>/dev/null || true
   kill "$REAPER_PID" 2>/dev/null || true
+  kill "$CONSENSUS_PID" 2>/dev/null || true
+  rm -f "$RUNTIME_DIR/crypto.cmd"
 }
 trap cleanup EXIT INT TERM
-
 echo "strongbox node=$NODE_ID port=$PORT state=$STATE_DIR"
 exec socat "TCP-LISTEN:${PORT},reuseaddr,fork" "EXEC:$0 --handle"
