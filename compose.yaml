@@ -1,0 +1,96 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: strongbox_admin
+      POSTGRES_PASSWORD: strongbox_admin_password # Dev/test mode only. Properly secure secrets if using in production.
+      POSTGRES_DB: appdb
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U strongbox_admin -d appdb"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  node1:
+    build: .
+    hostname: node1
+    environment:
+      STRONGBOX_NODE_ID: node1
+      STRONGBOX_PORT: "8200"
+      STRONGBOX_CLUSTER: node1:http://node1:8200,node2:http://node2:8200,node3:http://node3:8200
+      STRONGBOX_STATE_DIR: /var/lib/strongbox
+      STRONGBOX_AUDIT_LOG: /var/log/strongbox/audit.log
+      STRONGBOX_CONFIG: /etc/strongbox/config.yaml
+    ports:
+      - "8201:8200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - node1-state:/var/lib/strongbox
+      - node1-log:/var/log/strongbox
+      - ./config.yaml:/etc/strongbox/config.yaml:ro
+
+  node2:
+    build: .
+    hostname: node2
+    environment:
+      STRONGBOX_NODE_ID: node2
+      STRONGBOX_PORT: "8200"
+      STRONGBOX_CLUSTER: node1:http://node1:8200,node2:http://node2:8200,node3:http://node3:8200
+      STRONGBOX_STATE_DIR: /var/lib/strongbox
+      STRONGBOX_AUDIT_LOG: /var/log/strongbox/audit.log
+      STRONGBOX_CONFIG: /etc/strongbox/config.yaml
+    ports:
+      - "8202:8200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - node2-state:/var/lib/strongbox
+      - node2-log:/var/log/strongbox
+      - ./config.yaml:/etc/strongbox/config.yaml:ro
+
+  node3:
+    build: .
+    hostname: node3
+    environment:
+      STRONGBOX_NODE_ID: node3
+      STRONGBOX_PORT: "8200"
+      STRONGBOX_CLUSTER: node1:http://node1:8200,node2:http://node2:8200,node3:http://node3:8200
+      STRONGBOX_STATE_DIR: /var/lib/strongbox
+      STRONGBOX_AUDIT_LOG: /var/log/strongbox/audit.log
+      STRONGBOX_CONFIG: /etc/strongbox/config.yaml
+    ports:
+      - "8203:8200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - node3-state:/var/lib/strongbox
+      - node3-log:/var/log/strongbox
+      - ./config.yaml:/etc/strongbox/config.yaml:ro
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "8080:80"
+    depends_on:
+      - node1
+      - node2
+      - node3
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  pgdata:
+  node1-state:
+  node2-state:
+  node3-state:
+  node1-log:
+  node2-log:
+  node3-log:
