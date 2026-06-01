@@ -1,0 +1,21 @@
+cluster:
+  election_timeout_ms: 2500
+  heartbeat_interval_ms: 800
+  request_timeout_seconds: 2
+
+seal:
+  threshold: 3
+  shares: 5
+
+leases:
+  default_ttl_seconds: 60
+  max_ttl_seconds: 300
+  reap_interval_seconds: 3
+
+postgres:
+  host: postgres
+  port: 5432
+  database: appdb
+  admin_user: strongbox_admin
+  admin_password: strongbox_admin_password
+  readonly_grants: "GRANT CONNECT ON DATABASE appdb TO %USER%; GRANT USAGE ON SCHEMA public TO %USER%; GRANT SELECT ON ALL TABLES IN SCHEMA public TO %USER%;"
