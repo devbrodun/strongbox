@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export SB_ROOT
+source "$SB_ROOT/lib/util.sh"
+
+log_file="${1:-$AUDIT_LOG}"
+secret_file="$STATE_DIR/audit.secret"
+
+[[ -f "$log_file" ]] || die "audit log not found: $log_file"
+[[ -f "$secret_file" ]] || die "audit secret not found: $secret_file"
+
+secret="$(cat "$secret_file")"
+prev="GENESIS"
+line_no=0
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if ! printf '%s' "$line" | jq -e . >/dev/null 2>&1; then
+    echo "corrupted entry index $line_no: invalid json"
+    exit 1
+  fi
+  index="$(printf '%s' "$line" | jq -r '.index')"
+  stored_prev="$(printf '%s' "$line" | jq -r '.prev_hash')"
+  stored_hash="$(printf '%s' "$line" | jq -r '.hash')"
+  if [[ "$index" != "$line_no" || "$stored_prev" != "$prev" ]]; then
+    echo "corrupted entry index $line_no: index or previous hash mismatch"
+    exit 1
+  fi
+  payload="$(printf '%s' "$line" | jq -cS 'del(.hash)')"
+  expected="$(printf '%s' "$payload" | openssl dgst -sha256 -mac HMAC -macopt "hexkey:$secret" -binary | base64 | tr -d '\n')"
+  if [[ "$expected" != "$stored_hash" ]]; then
+    echo "corrupted entry index $line_no: hash mismatch"
+    exit 1
+  fi
+  prev="$stored_hash"
+  line_no=$((line_no + 1))
+done < "$log_file"
+
+echo "audit log verified: $line_no entries"
