@@ -83,8 +83,7 @@ Expected response shape:
 If the node was already initialized, the endpoint returns:
 
 ```json
-
-{"error":"already initialized"} // seems not to be working as expected - returns a 409(mismatch) error - still reasonable though.
+{ "error": "already initialized" }
 ```
 
 ### 2. Unseal Every Node
@@ -164,9 +163,9 @@ Secret reads return a static lease:
 
 ```json
 {
-  "data": {"user": "app", "password": "one"},
+  "data": { "user": "app", "password": "one" },
   "version": 1,
-  "lease": {"id": "...", "state": "active", "ttl": 60}
+  "lease": { "id": "...", "state": "active", "ttl": 60 }
 }
 ```
 
@@ -320,7 +319,7 @@ curl -fsS "$SB/v1/sys/health" | jq .
 After sealing, protected operations on that node return:
 
 ```json
-{"error":"strongbox is sealed"}
+{ "error": "strongbox is sealed" }
 ```
 
 Unseal the node again by submitting the threshold shares to `POST /v1/sys/unseal`.
@@ -345,16 +344,16 @@ Successful JSON responses use `Content-Type: application/json`. `204` responses 
 
 Common errors:
 
-| Status | Meaning |
-| --- | --- |
-| `400` | Invalid request body, missing required field, not initialized, or non-renewable lease. |
-| `401` | Missing, invalid, expired, or revoked bearer token. |
-| `403` | Token policy does not allow the requested capability/path. |
-| `404` | Route, policy, secret, version, token, or lease was not found. |
-| `409` | Write was sent to a follower or init was called after initialization. |
-| `503` | Node is sealed, write quorum is unavailable, or PostgreSQL is unavailable. |
+| Status | Meaning                                                                                      |
+| ------ | -------------------------------------------------------------------------------------------- |
+| `400`  | Invalid request body, missing required field, not initialized, or non-renewable lease.       |
+| `401`  | Missing, invalid, expired, or revoked bearer token.                                          |
+| `403`  | Token policy does not allow the requested capability/path.                                   |
+| `404`  | Route, policy, secret, version, token, or lease was not found.                               |
+| `409`  | Init was called after initialization, or a follower could not forward a write to the leader. |
+| `503`  | Node is sealed, write quorum is unavailable, or PostgreSQL is unavailable.                   |
 
-Writes should be sent to the current leader. If a follower receives a write, it returns:
+Clients should use the Nginx entrypoint. Nginx may send a request to any node; when a follower receives a write, it forwards the original request to the current leader. If the leader cannot be reached, the follower falls back to a leader hint:
 
 ```json
 {
@@ -502,7 +501,7 @@ Submits one Shamir share. This endpoint does not require auth.
 Request:
 
 ```json
-{"share":"1-..."}
+{ "share": "1-..." }
 ```
 
 Example:
@@ -537,9 +536,9 @@ Purges the active KEK from the node and returns it to sealed mode.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `sudo` | `sys/seal` |
+| Capability | Path       |
+| ---------- | ---------- |
+| `sudo`     | `sys/seal` |
 
 Example:
 
@@ -559,9 +558,9 @@ Writes a new version of a secret.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `write` | `secret/{path}` |
+| Capability | Path            |
+| ---------- | --------------- |
+| `write`    | `secret/{path}` |
 
 Request:
 
@@ -586,7 +585,7 @@ curl -fsS -X PUT "$SB/v1/secrets/app/db" \
 Response:
 
 ```json
-{"version":1}
+{ "version": 1 }
 ```
 
 Notes:
@@ -601,9 +600,9 @@ Reads the latest secret version.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `read` | `secret/{path}` |
+| Capability | Path            |
+| ---------- | --------------- |
+| `read`     | `secret/{path}` |
 
 Example:
 
@@ -615,9 +614,9 @@ Response:
 
 ```json
 {
-  "data": {"username": "app", "password": "secret"},
+  "data": { "username": "app", "password": "secret" },
   "version": 1,
-  "lease": {"id": "...", "state": "active", "ttl": 60}
+  "lease": { "id": "...", "state": "active", "ttl": 60 }
 }
 ```
 
@@ -637,9 +636,9 @@ Marks a secret as deleted.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `delete` | `secret/{path}` |
+| Capability | Path            |
+| ---------- | --------------- |
+| `delete`   | `secret/{path}` |
 
 Example:
 
@@ -655,12 +654,12 @@ Policies are JSON documents with a `rules` array. Each rule grants capabilities 
 
 Supported capabilities:
 
-| Capability | Meaning |
-| --- | --- |
-| `read` | Read secrets, policies, dynamic credentials, or audit entries. |
-| `write` | Write secrets. |
-| `delete` | Delete secrets. |
-| `sudo` | Administrative capability. Also satisfies any capability check. |
+| Capability | Meaning                                                         |
+| ---------- | --------------------------------------------------------------- |
+| `read`     | Read secrets, policies, dynamic credentials, or audit entries.  |
+| `write`    | Write secrets.                                                  |
+| `delete`   | Delete secrets.                                                 |
+| `sudo`     | Administrative capability. Also satisfies any capability check. |
 
 #### `PUT /v1/policies/{name}`
 
@@ -668,9 +667,9 @@ Creates or replaces a policy.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `sudo` | `policies/{name}` |
+| Capability | Path              |
+| ---------- | ----------------- |
+| `sudo`     | `policies/{name}` |
 
 Example:
 
@@ -684,7 +683,7 @@ curl -fsS -X PUT "$SB/v1/policies/app-read" \
 Response:
 
 ```json
-{"ok":true}
+{ "ok": true }
 ```
 
 More policy examples:
@@ -692,9 +691,9 @@ More policy examples:
 ```json
 {
   "rules": [
-    {"path": "secret/app/*", "capabilities": ["read", "write"]},
-    {"path": "dynamic-postgres/readonly", "capabilities": ["read"]},
-    {"path": "audit", "capabilities": ["read"]}
+    { "path": "secret/app/*", "capabilities": ["read", "write"] },
+    { "path": "dynamic-postgres/readonly", "capabilities": ["read"] },
+    { "path": "audit", "capabilities": ["read"] }
   ]
 }
 ```
@@ -705,9 +704,9 @@ Reads a policy.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `read` | `policies/{name}` |
+| Capability | Path              |
+| ---------- | ----------------- |
+| `read`     | `policies/{name}` |
 
 Example:
 
@@ -725,9 +724,9 @@ Creates a token.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `sudo` | `auth/tokens` |
+| Capability | Path          |
+| ---------- | ------------- |
+| `sudo`     | `auth/tokens` |
 
 Request:
 
@@ -786,7 +785,7 @@ This route requires a valid bearer token and must be sent to the leader. It does
 Request:
 
 ```json
-{"token":"..."}
+{ "token": "..." }
 ```
 
 Example:
@@ -842,9 +841,9 @@ Creates leased PostgreSQL credentials. The local config supports `readonly`.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `read` | `dynamic-postgres/{role}` |
+| Capability | Path                      |
+| ---------- | ------------------------- |
+| `read`     | `dynamic-postgres/{role}` |
 
 Example:
 
@@ -870,7 +869,7 @@ The default grant SQL is configured in `config.yaml`:
 
 ```yaml
 postgres:
-  readonly_grants: "GRANT CONNECT ON DATABASE appdb TO %USER%; GRANT USAGE ON SCHEMA public TO %USER%; GRANT SELECT ON ALL TABLES IN SCHEMA public TO %USER%;"
+  readonly_grants: 'GRANT CONNECT ON DATABASE appdb TO %USER%; GRANT USAGE ON SCHEMA public TO %USER%; GRANT SELECT ON ALL TABLES IN SCHEMA public TO %USER%;'
 ```
 
 ### Leases
@@ -879,12 +878,12 @@ Secret reads create static leases. Dynamic PostgreSQL reads create dynamic lease
 
 Lease states:
 
-| State | Meaning |
-| --- | --- |
-| `active` | Lease is valid. |
-| `expired` | Lease reached expiry and cleanup finished. |
-| `revoked` | Lease was manually revoked. |
-| `revocation_pending` | Cleanup failed and the reaper will retry. |
+| State                | Meaning                                    |
+| -------------------- | ------------------------------------------ |
+| `active`             | Lease is valid.                            |
+| `expired`            | Lease reached expiry and cleanup finished. |
+| `revoked`            | Lease was manually revoked.                |
+| `revocation_pending` | Cleanup failed and the reaper will retry.  |
 
 #### `POST /v1/leases/{id}/renew`
 
@@ -901,7 +900,7 @@ curl -fsS -X POST "$SB/v1/leases/$LEASE_ID/renew" "${AUTH[@]}" | jq .
 Response:
 
 ```json
-{"new_ttl":60}
+{ "new_ttl": 60 }
 ```
 
 #### `POST /v1/leases/{id}/revoke`
@@ -926,9 +925,9 @@ Returns audit entries.
 
 Required capability:
 
-| Capability | Path |
-| --- | --- |
-| `read` | `audit` |
+| Capability | Path    |
+| ---------- | ------- |
+| `read`     | `audit` |
 
 Example:
 
@@ -964,12 +963,12 @@ curl -fsS "$SB/v1/audit?token=$ROOT_ID" "${AUTH[@]}" | jq .
 
 These endpoints are for node-to-node traffic inside the compose network. They are documented for completeness, but clients should not call them directly.
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `GET` | `/_internal/health` | Returns node health for peer discovery. |
-| `POST` | `/_internal/replicate` | Applies replicated storage mutations. |
-| `POST` | `/_internal/vote` | Handles election vote requests. |
-| `POST` | `/_internal/heartbeat` | Handles leader heartbeats. |
+| Method | Path                   | Purpose                                 |
+| ------ | ---------------------- | --------------------------------------- |
+| `GET`  | `/_internal/health`    | Returns node health for peer discovery. |
+| `POST` | `/_internal/replicate` | Applies replicated storage mutations.   |
+| `POST` | `/_internal/vote`      | Handles election vote requests.         |
+| `POST` | `/_internal/heartbeat` | Handles leader heartbeats.              |
 
 ## Policies
 
@@ -988,15 +987,15 @@ The root policy created during init is:
 
 Policy path examples:
 
-| Resource | Policy path |
-| --- | --- |
-| Secret `app/db` | `secret/app/db` |
-| All app secrets | `secret/app/*` |
-| Policy `app-read` | `policies/app-read` |
-| Token creation | `auth/tokens` |
+| Resource                     | Policy path                 |
+| ---------------------------- | --------------------------- |
+| Secret `app/db`              | `secret/app/db`             |
+| All app secrets              | `secret/app/*`              |
+| Policy `app-read`            | `policies/app-read`         |
+| Token creation               | `auth/tokens`               |
 | Dynamic readonly credentials | `dynamic-postgres/readonly` |
-| Audit log query | `audit` |
-| Seal operation | `sys/seal` |
+| Audit log query              | `audit`                     |
+| Seal operation               | `sys/seal`                  |
 
 `sudo` satisfies any capability check, so use it sparingly.
 
@@ -1004,7 +1003,7 @@ Policy path examples:
 
 ### Leader And Quorum
 
-Node `node1` is the bootstrap leader. Writes require the current leader and a majority of configured nodes. Reads may be served by followers and can be stale relative to a just-committed leader write.
+Node `node1` is the bootstrap leader. Writes require the current leader and a majority of configured nodes. Nginx is the public entrypoint and can route to any node; followers transparently forward write requests to the leader, then return the leader response to the client. Reads may be served by followers and can be stale relative to a just-committed leader write.
 
 During a 2-1 partition, the majority side can elect a leader and continue writes. The minority side cannot satisfy quorum and refuses writes.
 
@@ -1056,6 +1055,48 @@ test/integration/run.sh
 ```
 
 The script initializes the cluster, unseals every node, checks secret versioning, verifies policy denial and token revocation, mints and revokes dynamic PostgreSQL credentials, and verifies the audit log.
+
+## Screenshots
+
+- [Cluster sealed](screenshots/cluster-sealed.png)
+- [Unseal flow](screenshots/unseal-flow.png)
+- [Dynamic PostgreSQL](screenshots/dynamic-postgres.png)
+- [Leader killed](screenshots/leader-killed.png)
+- [Partition behavior](screenshots/partition.png)
+- [Audit tamper detection](screenshots/audit-tampered.png)
+- [Memory cleanup check](screenshots/memory-clean.png)
+
+## Submission
+
+Public cluster URL:
+
+```text
+http://<vps-ip-or-domain>:8080
+```
+
+Repository:
+
+```text
+https://github.com/<owner>/<repo>
+```
+
+Create a grader-scoped root-equivalent token from an unsealed leader node:
+
+```bash
+export ROOT='paste-init-root-token'
+export SB=http://127.0.0.1:8201
+AUTH=(-H "Authorization: Bearer $ROOT")
+
+curl -fsS -X PUT "$SB/v1/policies/grader" \
+  "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"rules":[{"path":"*","capabilities":["read","write","delete","sudo"]}]}' | jq .
+
+curl -fsS -X POST "$SB/v1/auth/tokens" \
+  "${AUTH[@]}" \
+  -H 'Content-Type: application/json' \
+  -d '{"policies":["grader"],"ttl":604800}' | jq .
+```
 
 ## Threat Model
 
