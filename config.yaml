@@ -8,7 +8,7 @@ seal:
   shares: 5
 
 leases:
-  default_ttl_seconds: 60
+  default_ttl_seconds: 180
   max_ttl_seconds: 300
   reap_interval_seconds: 3
 

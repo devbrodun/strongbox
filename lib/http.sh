@@ -16,6 +16,7 @@ REQ_BODY=""
 REQ_AUTH=""
 REQ_TOKEN_RECORD=""
 REQ_TOKEN_ID="anonymous"
+REQ_WRITE_FORWARDED="false"
 
 http_read_request() {
   local line header key value len
@@ -77,10 +78,51 @@ require_capability() {
   }
 }
 
+proxy_write_to_leader() {
+  local hint leader url timeout body_file status body
+  hint="$(consensus_leader_hint_json)"
+  leader="$(printf '%s' "$hint" | jq -r '.leader // empty')"
+  url="$(printf '%s' "$hint" | jq -r '.leader_url // empty')"
+  [[ -n "$url" && "$leader" != "$NODE_ID" ]] || return 1
+
+  timeout="$(( $(config_get cluster.request_timeout_seconds 2) * $(cluster_size) * 3 ))"
+  [[ "$timeout" -ge 10 ]] || timeout=10
+  body_file="$(mktemp "$RUNTIME_DIR/proxy-body.XXXXXX")"
+  if [[ -n "$REQ_BODY" ]]; then
+    status="$(curl -sS --max-time "$timeout" -o "$body_file" -w '%{http_code}' \
+      -X "$REQ_METHOD" "$url$REQ_TARGET" \
+      -H "Authorization: $REQ_AUTH" \
+      -H 'Content-Type: application/json' \
+      --data-binary "$REQ_BODY" 2>/dev/null)" || {
+        rm -f "$body_file"
+        return 1
+      }
+  else
+    status="$(curl -sS --max-time "$timeout" -o "$body_file" -w '%{http_code}' \
+      -X "$REQ_METHOD" "$url$REQ_TARGET" \
+      -H "Authorization: $REQ_AUTH" 2>/dev/null)" || {
+        rm -f "$body_file"
+        return 1
+      }
+  fi
+  [[ "$status" =~ ^[0-9]{3}$ && "$status" != "000" ]] || {
+    rm -f "$body_file"
+    return 1
+  }
+  body="$(cat "$body_file")"
+  rm -f "$body_file"
+  json_response "$status" "$body"
+}
+
 require_leader_for_write() {
   if ! consensus_is_leader; then
+    if proxy_write_to_leader; then
+      REQ_WRITE_FORWARDED="true"
+      return 0
+    fi
     json_response 409 "$(consensus_leader_hint_json | jq '. + {error:"not leader"}')"
-    return 1
+    REQ_WRITE_FORWARDED="true"
+    return 0
   fi
 }
 
@@ -216,9 +258,10 @@ internal_health() {
 secret_put() {
   local path="$1" data latest version envelope record meta
   require_unsealed || return
+  require_leader_for_write
+  [[ "$REQ_WRITE_FORWARDED" == "true" ]] && return
   require_auth || return
   require_capability write "secret/$path" || return
-  require_leader_for_write || return
   data="$(printf '%s' "$REQ_BODY" | jq -c '.data')"
   [[ "$data" != "null" ]] || { error_response 400 "missing data"; return; }
   latest="$(storage_get secrets "$path/meta" 2>/dev/null | jq -r '.latest // 0' 2>/dev/null || echo 0)"
@@ -255,9 +298,10 @@ secret_get() {
 secret_delete() {
   local path="$1" meta
   require_unsealed || return
+  require_leader_for_write
+  [[ "$REQ_WRITE_FORWARDED" == "true" ]] && return
   require_auth || return
   require_capability delete "secret/$path" || return
-  require_leader_for_write || return
   meta="$(storage_get secrets "$path/meta")" || { error_response 404 "secret not found"; return; }
   meta="$(printf '%s' "$meta" | jq '.deleted=true')"
   replicate_put secrets "$path/meta" "$meta" || { error_response 503 "no write quorum"; return; }
@@ -269,9 +313,10 @@ secret_delete() {
 policy_put() {
   local name="$1" rules
   require_unsealed || return
+  require_leader_for_write
+  [[ "$REQ_WRITE_FORWARDED" == "true" ]] && return
   require_auth || return
   require_capability sudo "policies/$name" || return
-  require_leader_for_write || return
   rules="$(printf '%s' "$REQ_BODY" | jq -c '.')"
   replicate_put policies "$name" "$rules" || { error_response 503 "no write quorum"; return; }
   storage_put policies "$name" "$rules"
@@ -301,9 +346,10 @@ auth_login_route() {
 
 auth_token_create_route() {
   require_unsealed || return
+  require_leader_for_write
+  [[ "$REQ_WRITE_FORWARDED" == "true" ]] && return
   require_auth || return
   require_capability sudo auth/tokens || return
-  require_leader_for_write || return
   local policies ttl result token_id token_record
   policies="$(printf '%s' "$REQ_BODY" | jq -c '.policies // []')"
   ttl="$(printf '%s' "$REQ_BODY" | jq -r '.ttl // 3600')"
@@ -317,8 +363,9 @@ auth_token_create_route() {
 
 auth_revoke_route() {
   require_unsealed || return
+  require_leader_for_write
+  [[ "$REQ_WRITE_FORWARDED" == "true" ]] && return
   require_auth || return
-  require_leader_for_write || return
   local token token_id record
   token="$(printf '%s' "$REQ_BODY" | jq -r '.token')"
   token_id="$(token_id_for "$token")"
@@ -465,6 +512,7 @@ http_route() {
 }
 
 http_handle_once() {
+  REQ_WRITE_FORWARDED="false"
   http_read_request || exit 0
   http_route
 }

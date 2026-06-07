@@ -13,7 +13,7 @@
             :8200 leader        :8200 follower      :8200 follower
                  |                  |                  |
                  +---------- cluster HTTP ------------+
-                            /_internal/replicate
+                    /_internal/replicate, write proxy
 
 Per node runtime:
 
@@ -43,7 +43,8 @@ Persistent state:
 Runtime-only state:
 
   /dev/shm/strongbox-<node>/
-      kek.hex               active KEK while unsealed
+      crypto.cmd            private FIFO for the crypto daemon
+      crypto.resp.*         short-lived response FIFOs
       unseal.shares         threshold-progress file, removed after unseal
 
 External dependency:
@@ -68,11 +69,12 @@ Unseal:
   POST /v1/sys/unseal {share}
       -> collect threshold shares under /dev/shm
       -> reconstruct master material via lib/shamir.py
-      -> unwrap KEK into /dev/shm/strongbox-<node>/kek.hex
+      -> unwrap KEK into the per-node crypto daemon process
       -> remove submitted shares
 
 Secret write:
-  client -> leader PUT /v1/secrets/<path>
+  client -> nginx -> any node PUT /v1/secrets/<path>
+      -> follower forwards the original write to the current leader
       -> policy check: write on secret/<path>
       -> random DEK per version
       -> encrypt value with DEK
