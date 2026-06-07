@@ -62,28 +62,18 @@ curl -fsS "$SB/v1" | jq .
 
 ### 1. Initialize The Cluster
 
-Initialize once. The response contains a root token and five Shamir shares. Store them somewhere safe; the shares are only returned during init.
+Initialize once. The response contains a root token and five Shamir shares. Store them somewhere safe; the shares are only returned during init. The example below saves the one-time response locally so rerunning the walkthrough does not overwrite `ROOT` with an empty value after the expected `409 already initialized` response.
 
 ```bash
-INIT=$(curl -fsS -X POST "$SB/v1/sys/init")
-export ROOT=$(printf '%s' "$INIT" | jq -r .root_token)
+INIT_FILE=strongbox-init.json
+
+if [ ! -f "$INIT_FILE" ]; then
+  curl -fsS -X POST "$SB/v1/sys/init" -o "$INIT_FILE"
+fi
+
+export ROOT=$(jq -r .root_token "$INIT_FILE")
 printf '%s\n' "$ROOT"
-printf '%s' "$INIT" | jq -r '.shares[]'
-```
-
-Expected response shape:
-
-```json
-{
-  "shares": ["1-...", "2-...", "3-...", "4-...", "5-..."],
-  "root_token": "..."
-}
-```
-
-If the node was already initialized, the endpoint returns:
-
-```json
-{ "error": "already initialized" }
+jq -r '.shares[]' "$INIT_FILE"
 ```
 
 ### 2. Unseal Every Node
@@ -91,7 +81,7 @@ If the node was already initialized, the endpoint returns:
 The default config requires any three of the five shares. Submit three shares to each node:
 
 ```bash
-mapfile -t SHARES < <(printf '%s' "$INIT" | jq -r '.shares[0:3][]')
+mapfile -t SHARES < <(jq -r '.shares[0:3][]' "$INIT_FILE")
 
 for node in "$SB" "$SB2" "$SB3"; do
   for share in "${SHARES[@]}"; do
